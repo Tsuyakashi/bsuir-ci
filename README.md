@@ -2,6 +2,11 @@
 
 Flask app with GitLab CI/CD: build on feature branches, promote on merge, deploy to dev/prod on a self-hosted runner.
 
+| Environment | URL | Access |
+|---|---|---|
+| prod | https://bsuir-app.tail65829d.ts.net | Public (Tailscale Funnel) |
+| dev | https://dev-bsuir-app.tail65829d.ts.net | Tailnet admins only (Tailscale Service) |
+
 ## Diagrams
 
 ### Deployment
@@ -68,11 +73,13 @@ sequenceDiagram
 
     Note over dev,app: Feature branch (GitHub Flow)
     dev->>gl: git push feat/*
-    gl->>sr: build (changes in python/)
-    sr->>sr: docker build python/
-    sr->>reg: push :<sha>, :src-<tree>, :dev
+    opt changes in python/
+        gl->>sr: build
+        sr->>sr: docker build python/
+        sr->>reg: push :<sha>, :src-<tree>, :dev
+    end
     gl->>ct: deploy-dev
-    ct->>reg: pull :<sha>
+    ct->>reg: pull :src-<tree>
     ct->>app: compose up -d --wait (bsuir-ci-dev)
     app-->>ct: healthy
     Note over dev: verify on https://dev-bsuir-app.tail65829d.ts.net
@@ -102,9 +109,11 @@ flowchart TD
     branch -- "no (tag)" --> skip([no pipeline])
     branch -- yes --> main{"branch == main?"}
     main -- yes --> promote[promote] --> prod[deploy-prod]
-    main -- no --> changes{"changes in python/?"}
-    changes -- no --> skip2([no jobs])
-    changes -- yes --> build[build] --> devdeploy[deploy-dev]
+    main -- no --> py{"changes in python/?"}
+    py -- yes --> build[build] --> devdeploy["deploy-dev<br/>image :src-TREE"]
+    py -- no --> cfg{"changes in compose.yml<br/>or .gitlab-ci.yml?"}
+    cfg -- yes --> devdeploy
+    cfg -- no --> skip2([no jobs])
 ```
 
 ### Promote
@@ -161,22 +170,29 @@ flowchart LR
 
 | Event | Jobs | Result |
 |---|---|---|
-| Push to feature branch (changes in `python/`) | `build` → `deploy-dev` | Image built, deployed to dev (`:8081`) |
+| Push to feature branch (changes in `python/`) | `build` → `deploy-dev` | Image built, deployed to dev |
+| Push to feature branch (only `compose.yml` / `.gitlab-ci.yml`) | `deploy-dev` | Existing image (`src-<tree>`) redeployed to dev with new config |
 | Push to feature branch (docs only) | — | Nothing |
-| MR merged into `main` | `promote` → `deploy-prod` | Image retagged, deployed to prod (`:8080`) |
+| MR merged into `main` | `promote` → `deploy-prod` | Image retagged, deployed to prod |
 | Direct push to `main` | — | Blocked by branch protection |
 
 ### Image tags
 
 | Tag | Set by | Meaning |
 |---|---|---|
-| `<commit sha>` | `build` | Commit the image was built from |
-| `src-<tree>` | `build` | Hash of `python/` tree — content-based lookup key for `promote` |
+| `<commit sha>` | `build` | Commit the image was built from (traceability) |
+| `src-<tree>` | `build` | Hash of `python/` tree — content-based key used by `deploy-dev` and `promote` |
 | `dev` | `build` | Latest feature branch build |
 | `prod` | `promote` | Current production image |
-| `merged-<sha>` | `promote` | Image released by this merge commit (immutable, used for rollback) |
+| `merged-<sha>` | `promote` | Image released by this merge commit (immutable, deployed to prod, used for rollback) |
 
 `promote` finds the image by `python/` tree hash, so prod gets exactly the app content built on the feature branch, regardless of docs commits or merge method. If `main` diverged in `python/` while the MR was open, `promote` fails — rebase the branch.
+
+### Deploy
+
+Each environment is a separate compose project (`bsuir-ci-dev`, `bsuir-ci-prod`) from the same `compose.yml`, parametrized by `IMAGE_TAG` and `PORT`. Ports are published on `127.0.0.1` only — the apps are reachable solely through Tailscale.
+
+`docker compose up --wait` blocks until the container healthcheck (`GET /health` inside the container) passes, so a container that fails to start fails the deploy job. Unused images are pruned after each deploy.
 
 ### Rollback
 
@@ -187,7 +203,17 @@ skopeo copy --all docker://registry.gitlab.com/tsuyakashi/bsuir-ci:merged-<old_s
 
 ## Infrastructure
 
-Single LXC `bsuir-ci-ct` (CT 230 on `pve-rog`): GitLab runner (shell executor, user `deploy`) + Docker, dev and prod as separate compose projects (`bsuir-ci-dev`, `bsuir-ci-prod`). Reachable via Tailscale.
+Single LXC `bsuir-ci-ct` (CT 230 on `pve-rog`, tailnet node `bsuir-app`, `tag:bsuir`): GitLab runner (shell executor, user `deploy`) + Docker, dev and prod as separate compose projects.
+
+Prod is published to the internet via Tailscale Funnel on the node name. Dev is a tailnet-only Tailscale Service `svc:dev-bsuir-app` with its own name. Funnel does not support Services, hence the asymmetric setup.
+
+## Run locally
+
+```
+docker build -t bsuir-app python/
+docker run --rm -p 8080:80 bsuir-app
+curl http://localhost:8080/health
+```
 
 ## Cheatsheet
 
@@ -216,10 +242,58 @@ pct create 230 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
 - `--dev0 /dev/net/tun` — required by Tailscale
 - `nesting=1` — required by Docker
 
-### Tailscale (in CT)
+### Tailscale
+
+Order matters: ACL → tagged node → service definition → serve/funnel.
+
+1. ACL (tailnet policy file, managed separately). Relevant parts:
+```
+"tagOwners": {
+    "tag:bsuir": ["autogroup:admin"],
+},
+"grants": [
+    {
+        "src": ["autogroup:admin"],
+        "dst": ["svc:dev-bsuir-app"],
+        "ip":  ["tcp:443"],
+    },
+],
+"autoApprovers": {
+    "services": {
+        "svc:dev-bsuir-app": ["tag:bsuir"],
+    },
+},
+"nodeAttrs": [
+    // tagged nodes are not autogroup:member, so funnel is granted separately
+    {
+        "target": ["tag:bsuir"],
+        "attr":   ["funnel"],
+    },
+],
+```
+
+2. Join the tailnet with the tag (in CT):
 ```
 curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up --hostname bsuir-ci-ct --ssh
+tailscale up --hostname=bsuir-app --ssh --advertise-tags=tag:bsuir
+```
+For an already joined, user-owned node, changing tags requires re-authentication (`tailscale up` prints a login URL).
+
+3. Define the service in the admin console: Services → Add service → name `dev-bsuir-app`, endpoint `tcp:443`.
+
+4. Expose environments (in CT):
+```
+# prod: public via Funnel on the node name (bsuir-app.<tailnet>)
+tailscale funnel --bg 8080
+
+# dev: tailnet-only Tailscale Service (dev-bsuir-app.<tailnet>)
+tailscale serve --service=svc:dev-bsuir-app --https=443 127.0.0.1:8081
+```
+
+If the host advertised the service before it was defined in the console, the service stays at 0 hosts. Re-advertise:
+```
+systemctl restart tailscaled
+tailscale serve drain svc:dev-bsuir-app && sleep 3 && tailscale serve advertise svc:dev-bsuir-app
 ```
 
 ### Docker (in CT)
