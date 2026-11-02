@@ -57,9 +57,10 @@ promote:
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - docker compose -p "bsuir-ci-$CI_ENVIRONMENT_NAME" -f compose.yml pull
-    - docker compose -p "bsuir-ci-$CI_ENVIRONMENT_NAME" -f compose.yml up -d
-    - docker logout "$CI_REGISTRY"
+    - docker compose -p "bsuir-ci-$CI_ENVIRONMENT_NAME" -f compose.yml up -d --wait --wait-timeout 60
     - docker image prune -af
+  after_script:
+    - docker logout "$CI_REGISTRY"
 
 deploy-dev:
   extends: .deploy
