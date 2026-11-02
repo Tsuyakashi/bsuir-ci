@@ -1,6 +1,7 @@
 import datetime
 import logging
 from flask import Flask, request, render_template
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 
 logging.basicConfig(
@@ -9,6 +10,9 @@ logging.basicConfig(
 )
 
 app = Flask(__name__)
+
+# Behind Tailscale Serve/Funnel: trust exactly one proxy hop for the client IP.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 def get_cpu_load():
     try:

@@ -2,7 +2,7 @@ services:
   app:
     image: ${IMAGE}:${IMAGE_TAG}
     ports:
-      - "${PORT}:80"
+      - "127.0.0.1:${PORT}:80"
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:80/health', timeout=2)" ]
