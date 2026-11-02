@@ -1,17 +1,18 @@
-# Dockerfile
-FROM python:3.8-slim
+FROM python:3.12-slim AS builder
 
-# Установка рабочего каталога в контейнере
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM python:3.12-slim AS final
+
 WORKDIR /app
 
-# Копирование файлов в контейнер
-COPY . /app
+COPY --from=builder /install /usr/local
+COPY app.py .
+COPY templates/ templates/
 
-# Установка зависимостей
-RUN pip install flask
+USER 10001
 
-# Определение порта, на котором будет работать приложение
 EXPOSE 80
 
-# Запуск приложения
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:80", "--workers", "2", "--no-control-socket", "app:app"]
