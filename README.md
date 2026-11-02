@@ -74,6 +74,8 @@ sequenceDiagram
     Note over dev,app: Feature branch (GitHub Flow)
     dev->>gl: git push feat/*
     opt changes in python/
+        gl->>sr: test (pytest)
+        sr-->>gl: JUnit report
         gl->>sr: build
         sr->>sr: docker build python/
         sr->>reg: push :<sha>, :src-<tree>, :dev
@@ -110,7 +112,7 @@ flowchart TD
     branch -- yes --> main{"branch == main?"}
     main -- yes --> promote[promote] --> prod[deploy-prod]
     main -- no --> py{"changes in python/?"}
-    py -- yes --> build[build] --> devdeploy["deploy-dev<br/>image :src-TREE"]
+    py -- yes --> test[test] --> build[build] --> devdeploy["deploy-dev<br/>image :src-TREE"]
     py -- no --> cfg{"changes in compose.yml<br/>or .gitlab-ci.yml?"}
     cfg -- yes --> devdeploy
     cfg -- no --> skip2([no jobs])
@@ -170,7 +172,7 @@ flowchart LR
 
 | Event | Jobs | Result |
 |---|---|---|
-| Push to feature branch (changes in `python/`) | `build` → `deploy-dev` | Image built, deployed to dev |
+| Push to feature branch (changes in `python/`) | `test` → `build` → `deploy-dev` | Tests passed, image built, deployed to dev |
 | Push to feature branch (only `compose.yml` / `.gitlab-ci.yml`) | `deploy-dev` | Existing image (`src-<tree>`) redeployed to dev with new config |
 | Push to feature branch (docs only) | — | Nothing |
 | MR merged into `main` | `promote` → `deploy-prod` | Image retagged, deployed to prod |
@@ -187,6 +189,16 @@ flowchart LR
 | `merged-<sha>` | `promote` | Image released by this merge commit (immutable, deployed to prod, used for rollback) |
 
 `promote` finds the image by `python/` tree hash, so prod gets exactly the app content built on the feature branch, regardless of docs commits or merge method. If `main` diverged in `python/` while the MR was open, `promote` fails — rebase the branch.
+
+### Tests
+
+`test` runs `pytest` in `python:3.12-slim` on feature branches with changes in `python/`, before `build`. A failed test stops the pipeline: no image, no dev deploy. Results are published as a JUnit report and shown in the MR widget.
+
+Run locally:
+```
+cd python
+docker run --rm -it -v "$PWD":/app -w /app python:3.12-slim sh -c "pip install -r requirements.txt pytest && python -m pytest -v"
+```
 
 ### Deploy
 

@@ -3,10 +3,26 @@ workflow:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH
     - when: never
 
-stages: [build, release, deploy]
+stages: [test, build, release, deploy]
 
 variables:
   IMAGE: $CI_REGISTRY_IMAGE
+
+test:
+  stage: test
+  image: python:3.12-slim
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        - python/**/*
+  script:
+    - cd python
+    - pip install --no-cache-dir -r requirements.txt pytest
+    - python -m pytest -v --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: python/report.xml
 
 build:
   stage: build
