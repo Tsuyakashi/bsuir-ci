@@ -1,10 +1,35 @@
-# app.py
-from flask import Flask
+import datetime
+import logging
+from flask import Flask, request, render_template
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
+)
+
 app = Flask(__name__)
+
+def get_cpu_load():
+    try:
+        with open("/proc/loadavg", "r") as f:
+            load_1min = f.read().split()[0]
+        return load_1min
+    except Exception as e:
+        app.logger.error(f"Failed to get CPU load: {e}")
+        return "N/A"
+
+@app.before_request
+def log_request_info():
+    if request.path != '/health':
+        app.logger.info(f"HTTP {request.method} {request.path} from {request.remote_addr}")
 
 @app.route('/')
 def hello_world():
-    return 'Hello World!'
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cpu_load = get_cpu_load()
+    return render_template('index.html', timestamp=timestamp, cpu_load=cpu_load)
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=80)
+@app.route('/health')
+def healthcheck():
+    return { "status": "ok" }
