@@ -59,7 +59,7 @@ promote:
     - docker compose -p "bsuir-ci-$CI_ENVIRONMENT_NAME" -f compose.yml pull
     - docker compose -p "bsuir-ci-$CI_ENVIRONMENT_NAME" -f compose.yml up -d
     - docker logout "$CI_REGISTRY"
-    - docker image prune -f
+    - docker image prune -af
 
 deploy-dev:
   extends: .deploy
