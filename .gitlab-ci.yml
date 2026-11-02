@@ -74,7 +74,7 @@ deploy-dev:
     PORT: "8081"
   environment:
     name: dev
-    url: http://bsuir-ci-ct:8081
+    url: https://dev-bsuir-app.tail65829d.ts.net
 
 deploy-prod:
   extends: .deploy
@@ -86,4 +86,4 @@ deploy-prod:
     PORT: "8080"
   environment:
     name: prod
-    url: http://bsuir-ci-ct:8080
+    url: https://bsuir-app.tail65829d.ts.net
