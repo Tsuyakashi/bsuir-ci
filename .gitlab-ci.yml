@@ -64,13 +64,18 @@ promote:
 
 deploy-dev:
   extends: .deploy
-  needs: [build]
+  needs:
+    - job: build
+      optional: true
   rules:
     - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
       changes:
         - python/**/*
+        - compose.yml
+        - .gitlab-ci.yml
+  before_script:
+    - export IMAGE_TAG="src-$(git rev-parse HEAD:python)"
   variables:
-    IMAGE_TAG: $CI_COMMIT_SHA
     PORT: "8081"
   environment:
     name: dev
