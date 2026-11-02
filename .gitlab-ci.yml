@@ -1,0 +1,52 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH
+    - when: never
+
+stages: [build, release]
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE
+
+build:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        - python/**/*
+  before_script:
+    - apk add --no-cache git
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - TREE=$(git rev-parse HEAD:python)
+    - docker build -t "$IMAGE:$CI_COMMIT_SHA" -t "$IMAGE:src-$TREE" -t "$IMAGE:dev" python/
+    - docker push "$IMAGE:$CI_COMMIT_SHA"
+    - docker push "$IMAGE:src-$TREE"
+    - docker push "$IMAGE:dev"
+
+# Direct pushes to main are blocked (protected branch),
+# so every push here is an MR merge.
+promote:
+  stage: release
+  image: alpine:3.20
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    - apk add --no-cache git skopeo
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - echo "$CI_REGISTRY_PASSWORD" | skopeo login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - TREE=$(git rev-parse HEAD:python)
+    - |
+      if ! skopeo inspect --raw "docker://$IMAGE:src-$TREE" >/dev/null 2>&1; then
+        echo "no image for python/ tree $TREE — main diverged in python/, rebase the branch"
+        exit 1
+      fi
+    - skopeo copy --all "docker://$IMAGE:src-$TREE" "docker://$IMAGE:prod"
+    - skopeo copy --all "docker://$IMAGE:src-$TREE" "docker://$IMAGE:merged-$CI_COMMIT_SHA"
