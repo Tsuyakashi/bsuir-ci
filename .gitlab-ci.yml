@@ -3,7 +3,7 @@ workflow:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH
     - when: never
 
-stages: [build, release]
+stages: [build, release, deploy]
 
 variables:
   IMAGE: $CI_REGISTRY_IMAGE
@@ -50,3 +50,39 @@ promote:
       fi
     - skopeo copy --all "docker://$IMAGE:src-$TREE" "docker://$IMAGE:prod"
     - skopeo copy --all "docker://$IMAGE:src-$TREE" "docker://$IMAGE:merged-$CI_COMMIT_SHA"
+
+.deploy:
+  stage: deploy
+  tags: [bsuir-ci-ct]
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker compose -p "bsuir-ci-$CI_ENVIRONMENT_NAME" -f compose.yml pull
+    - docker compose -p "bsuir-ci-$CI_ENVIRONMENT_NAME" -f compose.yml up -d
+    - docker logout "$CI_REGISTRY"
+    - docker image prune -f
+
+deploy-dev:
+  extends: .deploy
+  needs: [build]
+  rules:
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        - python/**/*
+  variables:
+    IMAGE_TAG: $CI_COMMIT_SHA
+    PORT: "8081"
+  environment:
+    name: dev
+    url: http://bsuir-ci-ct:8081
+
+deploy-prod:
+  extends: .deploy
+  needs: [promote]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    IMAGE_TAG: merged-$CI_COMMIT_SHA
+    PORT: "8080"
+  environment:
+    name: prod
+    url: http://bsuir-ci-ct:8080

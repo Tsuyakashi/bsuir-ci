@@ -1,0 +1,6 @@
+services:
+  app:
+    image: ${IMAGE}:${IMAGE_TAG}
+    ports:
+      - "${PORT}:80"
+    restart: unless-stopped
