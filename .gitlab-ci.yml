@@ -108,3 +108,35 @@ deploy-prod:
   environment:
     name: prod
     url: https://bsuir-app.tail65829d.ts.net
+
+deploy-observability:
+  stage: deploy
+  tags: [bsuir-ci-ct]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - observability/**/*
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      changes:
+        - observability/**/*
+      when: manual
+      allow_failure: true
+  script:
+    - cd observability
+    - docker compose -p bsuir-observability pull
+    - docker compose -p bsuir-observability up -d --wait --wait-timeout 300
+    - |
+      curl -fsS -X POST http://127.0.0.1:5601/api/data_views/data_view \
+        -H 'kbn-xsrf: true' -H 'Content-Type: application/json' \
+        -d '{"data_view":{"id":"bsuir-app","title":"bsuir-app-*","name":"bsuir-app","timeFieldName":"@timestamp"},"override":true}'
+    - |
+      curl -fsS -X PUT http://127.0.0.1:9200/_index_template/bsuir-app \
+        -H 'Content-Type: application/json' \
+        -d '{"index_patterns":["bsuir-app-*"],"template":{"settings":{"number_of_replicas":0}}}'
+    - |
+      curl -fsS -X PUT 'http://127.0.0.1:9200/bsuir-app-*/_settings' \
+        -H 'Content-Type: application/json' \
+        -d '{"index":{"number_of_replicas":0}}'
+  environment:
+    name: observability
+    url: https://kibana-bsuir-app.tail65829d.ts.net

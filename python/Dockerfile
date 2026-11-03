@@ -8,11 +8,11 @@ FROM python:3.12-slim AS final
 WORKDIR /app
 
 COPY --from=builder /install /usr/local
-COPY app.py .
+COPY app.py gunicorn.conf.py ./
 COPY templates/ templates/
 
 USER 10001
 
 EXPOSE 80
 
-CMD ["gunicorn", "--bind", "0.0.0.0:80", "--workers", "2", "--no-control-socket", "app:app"]
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "--no-control-socket", "app:app"]
