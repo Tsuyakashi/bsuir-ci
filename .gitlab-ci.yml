@@ -129,6 +129,14 @@ deploy-observability:
       curl -fsS -X POST http://127.0.0.1:5601/api/data_views/data_view \
         -H 'kbn-xsrf: true' -H 'Content-Type: application/json' \
         -d '{"data_view":{"id":"bsuir-app","title":"bsuir-app-*","name":"bsuir-app","timeFieldName":"@timestamp"},"override":true}'
+    - |
+      curl -fsS -X PUT http://127.0.0.1:9200/_index_template/bsuir-app \
+        -H 'Content-Type: application/json' \
+        -d '{"index_patterns":["bsuir-app-*"],"template":{"settings":{"number_of_replicas":0}}}'
+    - |
+      curl -fsS -X PUT 'http://127.0.0.1:9200/bsuir-app-*/_settings' \
+        -H 'Content-Type: application/json' \
+        -d '{"index":{"number_of_replicas":0}}'
   environment:
     name: observability
     url: https://kibana-bsuir-app.tail65829d.ts.net
