@@ -1,11 +1,12 @@
 # BSUIR CI
 
-Flask app with GitLab CI/CD: build on feature branches, promote on merge, deploy to dev/prod on a self-hosted runner.
+Flask app with GitLab CI/CD: test and build on feature branches, promote on merge, deploy to dev/prod on a self-hosted runner. Application logs are shipped to an ELK stack (Filebeat → Logstash → Elasticsearch → Kibana) on the same host.
 
 | Environment | URL | Access |
 |---|---|---|
 | prod | https://bsuir-app.tail65829d.ts.net | Public (Tailscale Funnel) |
 | dev | https://dev-bsuir-app.tail65829d.ts.net | Tailnet admins only (Tailscale Service) |
+| Kibana | https://kibana-bsuir-app.tail65829d.ts.net | Tailnet admins only (Tailscale Service) |
 
 ## Diagrams
 
@@ -18,9 +19,9 @@ flowchart TB
     subgraph gitlab["GitLab.com"]
         repo["Repository<br/>Tsuyakashi/bsuir-ci"]
         ci["GitLab CI/CD engine"]
-        shared["SaaS shared runners<br/>build: docker:27 + dind<br/>promote: alpine + skopeo"]
+        shared["SaaS shared runners<br/>test: python:3.12-slim<br/>build: docker:27 + dind<br/>promote: alpine + skopeo"]
         registry[("Container Registry<br/>registry.gitlab.com/tsuyakashi/bsuir-ci")]
-        envs["Environments<br/>dev / prod"]
+        envs["Environments<br/>dev / prod / observability"]
     end
 
     github["GitHub<br/>push mirror"]
@@ -32,10 +33,21 @@ flowchart TB
             docker["Docker Engine"]
             devapp["bsuir-ci-dev-app-1<br/>localhost:8081 → 80"]
             prodapp["bsuir-ci-prod-app-1<br/>localhost:8080 → 80"]
+            subgraph obs["compose project bsuir-observability"]
+                filebeat["filebeat"]
+                logstash["logstash"]
+                es[("elasticsearch<br/>localhost:9200")]
+                kibana["kibana<br/>localhost:5601"]
+            end
             ts["tailscaled<br/>Serve / Funnel, TLS termination"]
             runner -->|docker compose| docker
             docker --> devapp
             docker --> prodapp
+            docker --> obs
+            devapp -.->|container logs| filebeat
+            prodapp -.->|container logs| filebeat
+            filebeat --> logstash --> es
+            kibana --> es
         end
     end
 
@@ -54,9 +66,10 @@ flowchart TB
 
     internet -->|"HTTPS<br/>bsuir-app.tail65829d.ts.net"| funnel
     funnel --> ts
-    tailnet -->|"HTTPS<br/>dev-bsuir-app.tail65829d.ts.net"| ts
+    tailnet -->|"HTTPS<br/>dev-bsuir-app / kibana-bsuir-app"| ts
     ts -->|"localhost:8080"| prodapp
     ts -->|"localhost:8081"| devapp
+    ts -->|"localhost:5601"| kibana
 ```
 
 ### Sequence
@@ -110,12 +123,19 @@ flowchart TD
     push([push event]) --> branch{"ref is a branch?"}
     branch -- "no (tag)" --> skip([no pipeline])
     branch -- yes --> main{"branch == main?"}
+
     main -- yes --> promote[promote] --> prod[deploy-prod]
+    main -- yes --> obsmain{"changes in observability/?"}
+    obsmain -- yes --> obsdeploy[deploy-observability]
+
     main -- no --> py{"changes in python/?"}
     py -- yes --> test[test] --> build[build] --> devdeploy["deploy-dev<br/>image :src-TREE"]
     py -- no --> cfg{"changes in compose.yml<br/>or .gitlab-ci.yml?"}
     cfg -- yes --> devdeploy
-    cfg -- no --> skip2([no jobs])
+    cfg -- no --> skip2([no app jobs])
+
+    main -- no --> obsbranch{"changes in observability/?"}
+    obsbranch -- yes --> obsmanual["deploy-observability<br/>(manual)"]
 ```
 
 ### Promote
@@ -130,6 +150,16 @@ flowchart TD
     mergedtag --> deploy(["deploy-prod pulls :merged-SHA"])
 ```
 
+### Log pipeline
+
+```mermaid
+flowchart LR
+    apps["bsuir-ci-dev / bsuir-ci-prod<br/>gunicorn JSON access log<br/>+ app log"] -->|"docker json-file logs"| fb["filebeat<br/>add_docker_metadata<br/>drop non-app containers"]
+    fb -->|"beats 5044"| ls["logstash<br/>env from compose project<br/>JSON → access.*, grok for the rest<br/>drop /health"]
+    ls --> es[("elasticsearch<br/>bsuir-app-{env}-YYYY.MM.dd")]
+    es --> kb["kibana<br/>dashboard imported from repo"]
+```
+
 ### Network flows
 
 ```mermaid
@@ -137,6 +167,7 @@ flowchart LR
     subgraph internet["Internet"]
         glcore["gitlab.com"]
         glreg[("registry.gitlab.com")]
+        elreg[("docker.elastic.co")]
         gh["github.com"]
         public["Internet clients"]
         relay["Tailscale Funnel relay"]
@@ -149,6 +180,7 @@ flowchart LR
             tsd["tailscaled<br/>Serve / Funnel"]
             prod["prod<br/>localhost:8080"]
             devapp["dev<br/>localhost:8081"]
+            kibana["kibana<br/>localhost:5601"]
         end
     end
 
@@ -159,13 +191,15 @@ flowchart LR
     ws -->|"SSH 22<br/>git push"| gh
     glcore -->|"HTTPS 443<br/>push mirror"| gh
     runner -->|"HTTPS 443<br/>long polling"| glcore
-    dockerd -->|"HTTPS 443<br/>image pull"| glreg
+    dockerd -->|"HTTPS 443<br/>app image pull"| glreg
+    dockerd -->|"HTTPS 443<br/>ELK image pull"| elreg
 
     public -->|"HTTPS 443<br/>bsuir-app.tail65829d.ts.net"| relay
     relay -->|"WireGuard"| tsd
-    tailnet -->|"HTTPS 443 over WireGuard<br/>dev-bsuir-app.tail65829d.ts.net"| tsd
+    tailnet -->|"HTTPS 443 over WireGuard<br/>dev-bsuir-app / kibana-bsuir-app"| tsd
     tsd -->|"HTTP"| prod
     tsd -->|"HTTP"| devapp
+    tsd -->|"HTTP"| kibana
 ```
 
 ## Pipeline
@@ -174,8 +208,10 @@ flowchart LR
 |---|---|---|
 | Push to feature branch (changes in `python/`) | `test` → `build` → `deploy-dev` | Tests passed, image built, deployed to dev |
 | Push to feature branch (only `compose.yml` / `.gitlab-ci.yml`) | `deploy-dev` | Existing image (`src-<tree>`) redeployed to dev with new config |
+| Push to feature branch (changes in `observability/`) | `deploy-observability` (manual) | Stack can be redeployed from the branch on demand |
 | Push to feature branch (docs only) | — | Nothing |
 | MR merged into `main` | `promote` → `deploy-prod` | Image retagged, deployed to prod |
+| MR merged into `main` (changes in `observability/`) | `deploy-observability` | Stack redeployed, index template and Kibana objects applied |
 | Direct push to `main` | — | Blocked by branch protection |
 
 ### Image tags
@@ -213,11 +249,47 @@ Deployments → Environments → `prod` → Re-deploy an older deployment. Or ma
 skopeo copy --all docker://registry.gitlab.com/tsuyakashi/bsuir-ci:merged-<old_sha> docker://registry.gitlab.com/tsuyakashi/bsuir-ci:prod
 ```
 
+## Application
+
+Flask app served by gunicorn (`python/gunicorn.conf.py`, 2 workers, non-root user). Endpoints: `/` (timestamp and 1-minute load average from `/proc/loadavg`) and `/health`.
+
+Behind Tailscale Serve/Funnel the client IP arrives in `X-Forwarded-For`. The app trusts exactly one proxy hop (`ProxyFix(x_for=1)`), which is safe because ports are bound to localhost and only `tailscaled` can reach them.
+
+The access log is written by gunicorn as one JSON object per line:
+```
+{"time":"[03/Nov/2026:14:05:58 +0000]","remote":"100.75.99.19","method":"GET","path":"/","query":"","status":200,"bytes":297,"duration_ms":3,"user_agent":"curl/8.18.0"}
+```
+`remote` is the real client (from `X-Forwarded-For`), `-` for requests without a proxy (docker healthcheck, local curl).
+
+## Observability
+
+`observability/compose.yml`, compose project `bsuir-observability`, all images pinned to `9.5.6`:
+
+| Service | Role | Limits |
+|---|---|---|
+| `filebeat` | Reads `/var/lib/docker/containers/*/*.log`, enriches with docker metadata, keeps only `bsuir-ci-dev` / `bsuir-ci-prod` containers | 256 MB |
+| `logstash` | Sets `env` (`dev`/`prod`) from the compose project label, parses JSON access log into `access.*`, grok for other lines, drops `/health` | 768 MB, heap 256 MB |
+| `elasticsearch` | Single node, daily indices `bsuir-app-{env}-YYYY.MM.dd`, `localhost:9200` | 2 GB, heap 1 GB |
+| `kibana` | UI on `localhost:5601`, exposed via Tailscale Service `svc:kibana-bsuir-app` | 1.2 GB |
+
+`deploy-observability` brings the stack up, then:
+- applies index template `bsuir-app` with `number_of_replicas: 0` (single node — otherwise indices stay yellow) and updates existing indices;
+- imports `observability/kibana/dashboards.ndjson` (data view `bsuir-app` + dashboard) with `overwrite=true`.
+
+Dashboard panels: requests over time by environment, unique visitors (metric), unique visitors over time. A visitor is a unique `access.remote` — an IP address, so users behind one NAT count as one, one user with several networks counts as several.
+
+To change the dashboard: edit it in Kibana, then export back into the repo:
+```
+ssh root@bsuir-app "curl -s -X POST localhost:5601/api/saved_objects/_export -H 'kbn-xsrf: true' -H 'Content-Type: application/json' -d '{\"type\":[\"dashboard\"],\"includeReferencesDeep\":true}'" > observability/kibana/dashboards.ndjson
+```
+
+Elasticsearch security is disabled on purpose: every port is bound to `127.0.0.1` and Kibana is reachable only by tailnet admins, so access is restricted at the network level.
+
 ## Infrastructure
 
-Single LXC `bsuir-ci-ct` (CT 230 on `pve-rog`, tailnet node `bsuir-app`, `tag:bsuir`): GitLab runner (shell executor, user `deploy`) + Docker, dev and prod as separate compose projects.
+Single LXC `bsuir-ci-ct` (CT 230 on `pve-rog`, tailnet node `bsuir-app`, `tag:bsuir`): GitLab runner (shell executor, user `deploy`), Docker, dev and prod as separate compose projects, plus the observability stack.
 
-Prod is published to the internet via Tailscale Funnel on the node name. Dev is a tailnet-only Tailscale Service `svc:dev-bsuir-app` with its own name. Funnel does not support Services, hence the asymmetric setup.
+Prod is published to the internet via Tailscale Funnel on the node name. Dev and Kibana are tailnet-only Tailscale Services (`svc:dev-bsuir-app`, `svc:kibana-bsuir-app`) with their own names. Funnel does not support Services, hence the asymmetric setup.
 
 ## Run locally
 
@@ -239,8 +311,8 @@ glab api -X POST projects/:id/protected_branches -f name=main -f push_access_lev
 ```
 pct create 230 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --hostname bsuir-ci-ct \
-  --cores 1 --memory 1024 --swap 512 \
-  --rootfs local-lvm:8 \
+  --cores 3 --memory 5120 --swap 1024 \
+  --rootfs local-lvm:24 \
   --net0 name=eth0,bridge=vmbr0,ip=dhcp \
   --nameserver 1.1.1.1 \
   --dev0 /dev/net/tun \
@@ -253,10 +325,12 @@ pct create 230 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
 - `--nameserver` — otherwise the CT inherits host MagicDNS (`100.100.100.100`), unreachable before Tailscale is up
 - `--dev0 /dev/net/tun` — required by Tailscale
 - `nesting=1` — required by Docker
+- 3 cores / 5 GB / 24 GB — sized for the apps plus the ELK stack
+- Elasticsearch needs `vm.max_map_count >= 262144` on the Proxmox host (not settable from an unprivileged CT); current Proxmox defaults already exceed it, check with `sysctl vm.max_map_count`
 
 ### Tailscale
 
-Order matters: ACL → tagged node → service definition → serve/funnel.
+Order matters: ACL → tagged node → service definitions → serve/funnel.
 
 1. ACL (tailnet policy file, managed separately). Relevant parts:
 ```
@@ -269,10 +343,16 @@ Order matters: ACL → tagged node → service definition → serve/funnel.
         "dst": ["svc:dev-bsuir-app"],
         "ip":  ["tcp:443"],
     },
+    {
+        "src": ["autogroup:admin"],
+        "dst": ["svc:kibana-bsuir-app"],
+        "ip":  ["tcp:443"],
+    },
 ],
 "autoApprovers": {
     "services": {
-        "svc:dev-bsuir-app": ["tag:bsuir"],
+        "svc:dev-bsuir-app":    ["tag:bsuir"],
+        "svc:kibana-bsuir-app": ["tag:bsuir"],
     },
 },
 "nodeAttrs": [
@@ -291,21 +371,24 @@ tailscale up --hostname=bsuir-app --ssh --advertise-tags=tag:bsuir
 ```
 For an already joined, user-owned node, changing tags requires re-authentication (`tailscale up` prints a login URL).
 
-3. Define the service in the admin console: Services → Add service → name `dev-bsuir-app`, endpoint `tcp:443`.
+3. Define the services in the admin console: Services → Add service → `dev-bsuir-app` and `kibana-bsuir-app`, endpoint `tcp:443` for both.
 
-4. Expose environments (in CT):
+4. Expose (in CT):
 ```
 # prod: public via Funnel on the node name (bsuir-app.<tailnet>)
 tailscale funnel --bg 8080
 
 # dev: tailnet-only Tailscale Service (dev-bsuir-app.<tailnet>)
 tailscale serve --service=svc:dev-bsuir-app --https=443 127.0.0.1:8081
+
+# kibana: tailnet-only Tailscale Service (kibana-bsuir-app.<tailnet>)
+tailscale serve --service=svc:kibana-bsuir-app --https=443 127.0.0.1:5601
 ```
 
-If the host advertised the service before it was defined in the console, the service stays at 0 hosts. Re-advertise:
+If the host advertised a service before it was defined in the console, the service stays at 0 hosts. Re-advertise:
 ```
 systemctl restart tailscaled
-tailscale serve drain svc:dev-bsuir-app && sleep 3 && tailscale serve advertise svc:dev-bsuir-app
+tailscale serve drain svc:<name> && sleep 3 && tailscale serve advertise svc:<name>
 ```
 
 ### Docker (in CT)
@@ -341,4 +424,16 @@ In CT:
 ```
 gitlab-runner register --non-interactive --url https://gitlab.com --token glrt-... --executor shell
 gitlab-runner verify
+```
+
+### Useful checks
+```
+# observability stack and indices
+ssh root@bsuir-app "docker compose -p bsuir-observability ps; curl -s 'localhost:9200/_cat/indices/bsuir-app-*?v'"
+
+# app access log
+ssh root@bsuir-app "docker logs bsuir-ci-prod-app-1 2>&1 | tail"
+
+# tailscale serve/funnel config
+ssh root@bsuir-app "tailscale serve status"
 ```
